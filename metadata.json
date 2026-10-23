@@ -1,0 +1,8 @@
+{
+  "name": "PaperForge 2.0",
+  "description": "Clean, dedicated PaperForge web application for designing Amazon KDP low-content book covers and interiors with drag-and-drop vector shapes, templates, and print-ready PDF export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
