@@ -1843,15 +1843,9 @@ export const StudioModule: React.FC = () => {
           return;
 
         case 'tool_select':
-          e.preventDefault();
-          setCanvasToolMode('select');
-          showToast('Select / Move Tool (V) — Drag elements or left-click empty space to pan');
-          return;
-
         case 'tool_pan':
           e.preventDefault();
-          setCanvasToolMode('pan');
-          showToast('Hand / Pan Tool (H) — Left-click & hold or touch/pen drag to move screen');
+          setCanvasToolMode('select');
           return;
 
         case 'undo':
@@ -8804,42 +8798,6 @@ export const StudioModule: React.FC = () => {
                 >
                   {leftPanelOpen ? <PanelLeftClose className="w-3.5 h-3.5" /> : <PanelLeftOpen className="w-3.5 h-3.5" />}
                 </button>
-
-                {/* Select / Move (V) vs Hand / Pan (H / Space) Tool Mode Toggle (Mouse, Touch & Smart Pen) */}
-                <div
-                  role="group"
-                  aria-label="Canvas Interaction Tool Mode"
-                  className="h-8 bg-[#131720] border border-[#303744] rounded-md p-0.5 flex items-center gap-0.5 shrink-0"
-                >
-                  <button
-                    type="button"
-                    data-testid="tool-mode-select"
-                    onClick={() => setCanvasToolMode('select')}
-                    title="Select & Move Tool (V) — Edit elements with mouse, touch, or smart pen; left-click & hold empty space to pan"
-                    className={`h-6.5 px-2 rounded-xs text-[11px] font-medium flex items-center gap-1 cursor-pointer transition ${
-                      !isEffectivePanMode
-                        ? 'bg-[#1677FF] text-white'
-                        : 'text-[#A1A9B8] hover:text-[#F3F4F6]'
-                    }`}
-                  >
-                    <MousePointer className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden md:inline">Select</span>
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="tool-mode-pan"
-                    onClick={() => setCanvasToolMode('pan')}
-                    title="Hand / Pan Tool (H or hold Spacebar) — Left-click & hold, touch-drag, or smart-pen drag anywhere to move screen"
-                    className={`h-6.5 px-2 rounded-xs text-[11px] font-medium flex items-center gap-1 cursor-pointer transition ${
-                      isEffectivePanMode
-                        ? 'bg-[#1677FF] text-white'
-                        : 'text-[#A1A9B8] hover:text-[#F3F4F6]'
-                    }`}
-                  >
-                    <Hand className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden md:inline">Pan</span>
-                  </button>
-                </div>
 
                 {/* Full Spread / Single Page Dropdown Button */}
                 <button
