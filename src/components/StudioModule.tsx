@@ -67,6 +67,7 @@ import {
   bulkAddInteriorPages,
   setBookTotalPageCount,
   calculatePaperCoverPlacementBox,
+  snapCoverImageElementToBounds,
   resolvePreviewInitialPageIndex,
   resolveCoverPreviewElements,
   extractSingleCoverPageElements,
@@ -193,7 +194,8 @@ function createDefaultProject(
   trimSize: StudioBookProject['trimSize'] = '6x9',
   template = 'lined',
   id?: string,
-  updatedAtOffsetMs = 0
+  updatedAtOffsetMs = 0,
+  projectStatus: 'in_progress' | 'completed' = 'in_progress'
 ): StudioBookProject {
   const preset = TRIM_MAP[trimSize] || TRIM_MAP['6x9'];
   return {
@@ -210,6 +212,7 @@ function createDefaultProject(
     binding: 'paperback',
     lastSaved: 'Saved 2 minutes ago',
     updatedAt: Date.now() - updatedAtOffsetMs,
+    projectStatus,
     pages: [
       {
         id: 'page-cover',
@@ -241,64 +244,78 @@ const STORAGE_KEY = 'pageforge_saved_projects_v1';
 const ACTIVE_PROJECT_ID_KEY = 'pageforge_active_project_id_v1';
 
 export const StudioModule: React.FC = () => {
-  // Top-level navigation view: 'editor' | 'dashboard'
-  const [currentView, setCurrentView] = useState<'editor' | 'dashboard'>('editor');
+  // Top-level navigation view: 'editor' | 'dashboard' | 'projects'
+  const [currentView, setCurrentView] = useState<'editor' | 'dashboard' | 'projects'>('editor');
 
   // Saved projects list with localStorage persistence and duplicate-ID sanitization
   const [savedProjects, setSavedProjects] = useState<StudioBookProject[]>(() => {
+    const defaultSeeds: StudioBookProject[] = [
+      createDefaultProject('My First Book', '6x9', 'lined', 'proj-seed-1', 120000, 'in_progress'),
+      createDefaultProject('Daily Productivity Planner', '6x9', 'daily_planner', 'proj-seed-2', 360000, 'in_progress'),
+      createDefaultProject('Dot Grid Bullet Journal', '8x10', 'dotgrid', 'proj-seed-3', 720000, 'completed'),
+    ];
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const seenIds = new Set<string>();
-          return parsed.map((proj: StudioBookProject, index: number) => {
-            let uniqueId = proj.id || `proj-seed-${index + 1}`;
-            if (seenIds.has(uniqueId)) {
-              uniqueId = `${uniqueId}-${index + 1}-${Math.random().toString(36).slice(2, 6)}`;
-            }
-            seenIds.add(uniqueId);
-            const preset = TRIM_MAP[proj.trimSize] || TRIM_MAP['6x9'];
-            const migratedPages = Array.isArray(proj.pages)
-              ? proj.pages.map(pg => ({
-                  ...pg,
-                  elements: Array.isArray(pg.elements)
-                    ? pg.elements.map(el => {
-                        if (el.type !== 'image') return el;
-                        const wasStoppedNearBottom =
-                          el.y <= 6 && el.height >= 88 && el.height < 100 && el.width >= 45;
-                        return {
-                          ...el,
-                          preserveAspectRatio: false,
-                          ...(wasStoppedNearBottom
-                            ? { y: 0, height: 100 }
-                            : {}),
-                        };
-                      })
-                    : [],
-                }))
-              : proj.pages;
-            return {
-              ...proj,
-              id: uniqueId,
-              pages: migratedPages,
-              customWidthIn: proj.customWidthIn || preset.w,
-              customHeightIn: proj.customHeightIn || preset.h,
-              margins: proj.margins || { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 },
-              bleedInches: typeof proj.bleedInches === 'number' ? proj.bleedInches : 0.125,
-              updatedAt: proj.updatedAt || Date.now() - index * 60000,
-            };
-          });
+          const normalized = parsed
+            .filter((proj: StudioBookProject) => Boolean(proj))
+            .map((proj: StudioBookProject, index: number) => {
+              let uniqueId = proj.id || `proj-seed-${index + 1}`;
+              if (seenIds.has(uniqueId)) {
+                uniqueId = `${uniqueId}-${index + 1}-${Math.random().toString(36).slice(2, 6)}`;
+              }
+              seenIds.add(uniqueId);
+              const preset = TRIM_MAP[proj.trimSize] || TRIM_MAP['6x9'];
+              const migratedPages = Array.isArray(proj.pages)
+                ? proj.pages.map((pg, pageIdx) => ({
+                    ...pg,
+                    elements: Array.isArray(pg.elements)
+                      ? pg.elements.map(el => {
+                          if (el.type !== 'image') return el;
+                          const wasStoppedNearBottom =
+                            el.y <= 6 && el.height >= 88 && el.height < 100 && el.width >= 40;
+                          const baseEl = {
+                            ...el,
+                            preserveAspectRatio: false,
+                            ...(wasStoppedNearBottom
+                              ? { y: 0, height: 100 }
+                              : {}),
+                          };
+                          return pg.isCover || pageIdx === 0
+                            ? snapCoverImageElementToBounds(baseEl)
+                            : baseEl;
+                        })
+                      : [],
+                  }))
+                : proj.pages;
+              const defaultStatus: 'in_progress' | 'completed' =
+                uniqueId === 'proj-seed-3' ? 'completed' : 'in_progress';
+              return {
+                ...proj,
+                id: uniqueId,
+                pages: migratedPages,
+                customWidthIn: proj.customWidthIn || preset.w,
+                customHeightIn: proj.customHeightIn || preset.h,
+                margins: proj.margins || { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 },
+                bleedInches: typeof proj.bleedInches === 'number' ? proj.bleedInches : 0.125,
+                updatedAt: proj.updatedAt || Date.now() - index * 60000,
+                projectStatus: proj.projectStatus || defaultStatus,
+              };
+            });
+          // Ensure sample completed & work-in-progress projects exist if only 1 seed was stored
+          if (normalized.length === 1 && normalized[0].id === 'proj-seed-1') {
+            return [normalized[0], defaultSeeds[1], defaultSeeds[2]];
+          }
+          return normalized;
         }
       }
     } catch {
       // ignore storage errors
     }
-    return [
-      createDefaultProject('My First Book', '6x9', 'lined', 'proj-seed-1', 120000),
-      createDefaultProject('Daily Productivity Planner', '6x9', 'daily_planner', 'proj-seed-2', 360000),
-      createDefaultProject('Dot Grid Bullet Journal', '8x10', 'dotgrid', 'proj-seed-3', 720000),
-    ];
+    return defaultSeeds;
   });
 
   // Active Project State (restores last active project ID from localStorage when available)
@@ -398,9 +415,10 @@ export const StudioModule: React.FC = () => {
   const lastSaveModeRef = useRef<'auto' | 'manual'>('auto');
   const manualSaveTimerRef = useRef<number | null>(null);
 
-  // Dashboard Project Management State (Search, Sort, Rename, Delete Confirmation)
+  // Dashboard Project Management State (Search, Sort, Status Filter, Rename, Delete Confirmation)
   const [dashboardSearch, setDashboardSearch] = useState<string>('');
   const [dashboardSort, setDashboardSort] = useState<'recent' | 'name' | 'pages'>('recent');
+  const [projectsStatusFilter, setProjectsStatusFilter] = useState<'all' | 'in_progress' | 'completed'>('all');
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<string>('');
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null);
@@ -2762,7 +2780,7 @@ export const StudioModule: React.FC = () => {
         const deltaY = mouseY - resizeSession.mouseY;
         const shouldLockRatio = shiftKey || resizeSession.lockAspectRatio;
 
-        const nextBox = calculateResizedElementBox({
+        let nextBox = calculateResizedElementBox({
           handle: resizeSession.handle,
           initialX: resizeSession.initialX,
           initialY: resizeSession.initialY,
@@ -2775,6 +2793,37 @@ export const StudioModule: React.FC = () => {
           minH: 1,
         });
 
+        // Magnetic edge snapping when resizing so images never fall 1-2% short of template edges or spine
+        if (snapToGuides && !shouldLockRatio) {
+          let left = nextBox.x;
+          let top = nextBox.y;
+          let right = nextBox.x + nextBox.width;
+          let bottom = nextBox.y + nextBox.height;
+          const snapTol = 2.0;
+
+          if (resizeSession.handle.includes('w')) {
+            if (Math.abs(left - 0) <= snapTol) left = 0;
+            else if ((isEditingCover || spreadMode === 'full') && Math.abs(left - 50) <= snapTol) left = 50;
+          }
+          if (resizeSession.handle.includes('e')) {
+            if (Math.abs(right - 100) <= snapTol) right = 100;
+            else if ((isEditingCover || spreadMode === 'full') && Math.abs(right - 50) <= snapTol) right = 50;
+          }
+          if (resizeSession.handle.includes('n')) {
+            if (Math.abs(top - 0) <= snapTol) top = 0;
+          }
+          if (resizeSession.handle.includes('s')) {
+            if (Math.abs(bottom - 100) <= snapTol) bottom = 100;
+          }
+
+          nextBox = {
+            x: Number(left.toFixed(2)),
+            y: Number(top.toFixed(2)),
+            width: Number(Math.max(1, right - left).toFixed(2)),
+            height: Number(Math.max(1, bottom - top).toFixed(2)),
+          };
+        }
+
         updateElementByIdLive(resizeSession.elemId, nextBox);
         return;
       }
@@ -2784,7 +2833,17 @@ export const StudioModule: React.FC = () => {
         let newY = Math.max(-150, Math.min(150, mouseY - dragSession.offsetY));
 
         if (snapToGuides) {
-          if (isEditingCover) {
+          const edgeTol = 1.6;
+          // Snap outer edges & center spine (0%, 50%, 100%) so cover images align flush without white lines
+          if (Math.abs(newX - 0) <= edgeTol) {
+            newX = 0;
+          } else if (Math.abs(newX + dragSession.width - 100) <= edgeTol) {
+            newX = 100 - dragSession.width;
+          } else if ((isEditingCover || spreadMode === 'full') && Math.abs(newX - 50) <= edgeTol) {
+            newX = 50;
+          } else if ((isEditingCover || spreadMode === 'full') && Math.abs(newX + dragSession.width - 50) <= edgeTol) {
+            newX = 50 - dragSession.width;
+          } else if (isEditingCover) {
             const spineLeftX = coverSpecs.bleedMargin + currentTrim.w;
             const spineRightX = spineLeftX + coverSpecs.spineWidth;
             const frontCenterInches = spineRightX + currentTrim.w / 2;
@@ -2800,9 +2859,16 @@ export const StudioModule: React.FC = () => {
               newX = pageCenterPct - dragSession.width / 2;
             }
           }
-          const elemCenterYPct = newY + dragSession.height / 2;
-          if (dragSession.height < 85 && Math.abs(elemCenterYPct - 50) < 1.0) {
-            newY = 50 - dragSession.height / 2;
+
+          if (Math.abs(newY - 0) <= edgeTol) {
+            newY = 0;
+          } else if (Math.abs(newY + dragSession.height - 100) <= edgeTol) {
+            newY = 100 - dragSession.height;
+          } else {
+            const elemCenterYPct = newY + dragSession.height / 2;
+            if (dragSession.height < 85 && Math.abs(elemCenterYPct - 50) < 1.0) {
+              newY = 50 - dragSession.height / 2;
+            }
           }
         }
 
@@ -2812,7 +2878,15 @@ export const StudioModule: React.FC = () => {
         });
       }
     },
-    [snapToGuides, isEditingCover, coverSpecs, currentTrim, updateElementByIdLive, clientPointToActivePagePct]
+    [
+      snapToGuides,
+      spreadMode,
+      isEditingCover,
+      coverSpecs,
+      currentTrim,
+      updateElementByIdLive,
+      clientPointToActivePagePct,
+    ]
   );
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -3225,20 +3299,63 @@ export const StudioModule: React.FC = () => {
     showToast('Project permanently deleted');
   };
 
-  // Filtered and Sorted Dashboard Projects
+  const handleToggleProjectStatus = (projId: string) => {
+    let nextStatusLabel = 'Work in Progress';
+    setSavedProjects(prev => {
+      const next = prev.map(p => {
+        if (p.id !== projId) return p;
+        const nextStatus: 'in_progress' | 'completed' =
+          p.projectStatus === 'completed' ? 'in_progress' : 'completed';
+        nextStatusLabel = nextStatus === 'completed' ? 'Completed' : 'Work in Progress';
+        return {
+          ...p,
+          projectStatus: nextStatus,
+          lastSaved: 'Saved just now',
+          updatedAt: Date.now(),
+        };
+      });
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+    if (project.id === projId) {
+      setProject(prev => ({
+        ...prev,
+        projectStatus: prev.projectStatus === 'completed' ? 'in_progress' : 'completed',
+        lastSaved: 'Saved just now',
+        updatedAt: Date.now(),
+      }));
+    }
+    showToast(`Marked project as ${nextStatusLabel}`);
+  };
+
+  // Filtered and Sorted Projects (Current active project + other work-in-progress / completed projects)
   const displayedDashboardProjects = useMemo(() => {
-    const filtered = savedProjects.filter(
-      p =>
+    const filtered = savedProjects.filter(p => {
+      const status = p.projectStatus || 'in_progress';
+      if (projectsStatusFilter !== 'all' && status !== projectsStatusFilter) {
+        return false;
+      }
+      return (
         dashboardSearch.trim() === '' ||
         p.title.toLowerCase().includes(dashboardSearch.toLowerCase()) ||
         p.trimSize.toLowerCase().includes(dashboardSearch.toLowerCase())
-    );
+      );
+    });
     return [...filtered].sort((a, b) => {
+      // Keep the project currently being worked on first when sorting by recent
+      if (dashboardSort === 'recent') {
+        if (a.id === project.id && b.id !== project.id) return -1;
+        if (b.id === project.id && a.id !== project.id) return 1;
+      }
       if (dashboardSort === 'name') return a.title.localeCompare(b.title);
       if (dashboardSort === 'pages') return b.pages.length - a.pages.length;
       return (b.updatedAt || 0) - (a.updatedAt || 0);
     });
-  }, [savedProjects, dashboardSearch, dashboardSort]);
+  }, [savedProjects, dashboardSearch, dashboardSort, projectsStatusFilter, project.id]);
 
   // Miniature visual layout preview inside each of the 12 Index Template Cards
   const renderIndexCardMiniSvg = (tmplId: IndexTemplateStyle) => {
@@ -5052,22 +5169,32 @@ export const StudioModule: React.FC = () => {
     if (imgElements.length === 0) return null;
     return (
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-10">
-        {imgElements.map(img => (
-          <img
-            key={`html-preview-${img.id}`}
-            data-testid="preview-html-image"
-            src={img.imageUrl}
-            alt={img.imageAlt || 'Paper cover image'}
-            style={{
-              left: `${img.x}%`,
-              top: `${img.y}%`,
-              width: `${img.width}%`,
-              height: `${img.height}%`,
-              opacity: img.opacity ?? 1,
-            }}
-            className="absolute object-fill pointer-events-none select-none"
-          />
-        ))}
+        {imgElements.map(img => {
+          // Slightly bleed edges that sit at 0%, 50%, or 100% to eliminate any subpixel browser AA white seam
+          const bleedLeft =
+            img.x <= 0.5 ? -0.25 : Math.abs(img.x - 50) <= 0.5 ? 49.85 : img.x;
+          const bleedTop = img.y <= 0.5 ? -0.25 : img.y;
+          const rawRight = img.x + img.width;
+          const bleedRight =
+            rawRight >= 99.5 ? 100.25 : Math.abs(rawRight - 50) <= 0.5 ? 50.15 : rawRight;
+          const bleedBottom = img.y + img.height >= 99.5 ? 100.25 : img.y + img.height;
+          return (
+            <img
+              key={`html-preview-${img.id}`}
+              data-testid="preview-html-image"
+              src={img.imageUrl}
+              alt={img.imageAlt || 'Paper cover image'}
+              style={{
+                left: `${bleedLeft}%`,
+                top: `${bleedTop}%`,
+                width: `${bleedRight - bleedLeft}%`,
+                height: `${bleedBottom - bleedTop}%`,
+                opacity: img.opacity ?? 1,
+              }}
+              className="absolute object-fill pointer-events-none select-none block"
+            />
+          );
+        })}
       </div>
     );
   };
@@ -5080,10 +5207,31 @@ export const StudioModule: React.FC = () => {
     isCoverCanvas: boolean
   ) => {
     return elements.map(el => {
-      const cx = (el.x / 100) * canvasW;
-      const cy = (el.y / 100) * canvasH;
-      const cw = (el.width / 100) * canvasW;
-      const ch = (el.height / 100) * canvasH;
+      const adjX =
+        el.type === 'image'
+          ? el.x <= 0.5
+            ? -0.25
+            : Math.abs(el.x - 50) <= 0.5
+            ? 49.85
+            : el.x
+          : el.x;
+      const adjY = el.type === 'image' && el.y <= 0.5 ? -0.25 : el.y;
+      const rawRight = el.x + el.width;
+      const adjRight =
+        el.type === 'image'
+          ? rawRight >= 99.5
+            ? 100.25
+            : Math.abs(rawRight - 50) <= 0.5
+            ? 50.15
+            : rawRight
+          : rawRight;
+      const adjBottom =
+        el.type === 'image' && el.y + el.height >= 99.5 ? 100.25 : el.y + el.height;
+
+      const cx = (adjX / 100) * canvasW;
+      const cy = (adjY / 100) * canvasH;
+      const cw = ((adjRight - adjX) / 100) * canvasW;
+      const ch = ((adjBottom - adjY) / 100) * canvasH;
 
       return (
         <g key={el.id} style={{ opacity: el.opacity ?? 1 }} pointerEvents="none">
@@ -6408,276 +6556,269 @@ export const StudioModule: React.FC = () => {
           A. TOP TOOLBAR (60px tall, #191D25, matching PageForge reference image)
          ===================================================================== */}
       <header className="h-[60px] bg-[#191D25] border-b border-[#303744] px-4 flex items-center justify-between shrink-0 z-30">
-        {/* Left Zone: PageForge Logo + Dashboard / Templates / Projects Navigation */}
+        {/* Left Zone: PaperForge Brand Label (Non-clickable) + Dashboard / Projects Navigation */}
         <div className="flex items-center gap-7">
-          <button
-            onClick={() => {
-              setDownloadDropdownOpen(false);
-              setCurrentView('editor');
-            }}
-            title="Return to PageForge Editor"
-            className="flex items-center gap-2.5 text-[#F3F4F6] hover:opacity-95 cursor-pointer whitespace-nowrap shrink-0"
+          <div
+            data-testid="brand-header-logo"
+            className="flex items-center gap-2.5 text-[#F3F4F6] whitespace-nowrap shrink-0 select-none"
           >
             <BookOpen className="w-6 h-6 text-[#1677FF] stroke-[2.2]" />
-            <span className="font-bold text-[17px] tracking-tight text-[#F3F4F6]">PageForge</span>
-          </button>
+            <span className="font-bold text-[17px] tracking-tight text-[#F3F4F6]">PaperForge</span>
+          </div>
 
-          <nav className="hidden md:flex items-center gap-6 text-[13px] font-medium text-[#A1A9B8]">
+          <nav className="flex items-center gap-5 text-[13px] font-medium text-[#A1A9B8]">
             <button
+              type="button"
+              data-testid="top-nav-dashboard"
               onClick={() => {
                 setDownloadDropdownOpen(false);
                 setCurrentView(currentView === 'dashboard' ? 'editor' : 'dashboard');
               }}
-              title="Open Project Dashboard"
+              title="Open Workspace Dashboard"
               className={`hover:text-[#F3F4F6] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                currentView === 'dashboard' ? 'text-[#F3F4F6] font-semibold' : ''
+                currentView === 'dashboard' ? 'text-[#1677FF] font-semibold' : ''
               }`}
             >
               Dashboard
             </button>
             <button
+              type="button"
+              data-testid="top-nav-projects"
               onClick={() => {
                 setDownloadDropdownOpen(false);
-                setCurrentView('editor');
-                setActiveLeftTool(activeLeftTool === 'templates' ? 'pages' : 'templates');
+                setCurrentView(currentView === 'projects' ? 'editor' : 'projects');
               }}
-              title="Browse KDP Interior Templates"
+              title="View Your Created Projects"
               className={`hover:text-[#F3F4F6] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                currentView === 'editor' && activeLeftTool === 'templates' ? 'text-[#F3F4F6] font-semibold' : ''
+                currentView === 'projects' ? 'text-[#1677FF] font-semibold' : ''
               }`}
-            >
-              Templates
-            </button>
-            <button
-              onClick={() => {
-                setDownloadDropdownOpen(false);
-                setCurrentView('dashboard');
-              }}
-              title="Manage Saved Book Projects"
-              className="hover:text-[#F3F4F6] transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               Projects
             </button>
           </nav>
         </div>
 
-        {/* Center Zone: Editable Project Name Box with Blue Pencil Icon */}
-        <div className="hidden sm:flex items-center justify-center">
-          <div className="w-[290px] h-9 bg-[#131720] border border-[#303744] focus-within:border-[#1677FF] rounded-md px-3.5 flex items-center justify-between transition-colors">
-            <input
-              ref={titleInputRef}
-              type="text"
-              aria-label="Project Name"
-              value={project.title}
-              onChange={e => {
-                const val = e.target.value;
-                setProject(prev => ({
-                  ...prev,
-                  title: val,
-                  lastSaved: 'Saved just now',
-                  updatedAt: Date.now(),
-                }));
-                setSaveStatusText('Saved just now');
-              }}
-              className="bg-transparent text-[#F3F4F6] font-medium text-[13px] w-full focus:outline-none truncate"
-              placeholder="Enter project name..."
-            />
-            <button
-              onClick={() => titleInputRef.current?.focus()}
-              aria-label="Edit Project Name"
-              title="Rename project"
-              className="text-[#1677FF] hover:text-[#4096ff] ml-2 cursor-pointer shrink-0"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Right Zone: Undo/Redo, Autosave Status, Manual Save Button, Preview Button, Blue Download PDF Button */}
-        <div className="flex items-center gap-1.5 sm:gap-2.5">
-          <div className="flex items-center gap-0.5 sm:gap-1">
-            <button
-              onClick={handleUndo}
-              disabled={historyIndex <= 0}
-              aria-label="Undo"
-              title="Undo (Ctrl+Z)"
-              className="p-1.5 sm:p-2 text-[#A1A9B8] hover:text-[#F3F4F6] hover:bg-[#252B36] disabled:opacity-40 rounded-md transition cursor-pointer"
-            >
-              <Undo2 className="w-4 h-4" />
-            </button>
-            <button
-              onClick={handleRedo}
-              disabled={historyIndex >= history.length - 1}
-              aria-label="Redo"
-              title="Redo (Ctrl+Y)"
-              className="p-1.5 sm:p-2 text-[#A1A9B8] hover:text-[#F3F4F6] hover:bg-[#252B36] disabled:opacity-40 rounded-md transition cursor-pointer"
-            >
-              <Redo2 className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Autosave status with green check circle */}
-          <div
-            data-testid="autosave-status-indicator"
-            title="All changes are automatically saved to local storage"
-            className="hidden lg:flex items-center gap-2 text-[12px] text-[#A1A9B8] px-1.5 whitespace-nowrap shrink-0"
-          >
-            <span className="w-4 h-4 rounded-full bg-[#22C55E] text-[#111318] flex items-center justify-center">
-              <Check className="w-2.5 h-2.5 stroke-[3]" />
-            </span>
-            <span>{saveStatusText}</span>
-          </div>
-
-          {/* Manual Save Button (positioned immediately to the left of Preview button) */}
-          <button
-            type="button"
-            data-testid="manual-save-btn"
-            onClick={handleManualSave}
-            title="Save project now (Ctrl+S)"
-            className={`h-8 sm:h-9 px-2.5 sm:px-3.5 border rounded-md text-xs sm:text-[13px] font-medium flex items-center gap-1.5 sm:gap-2 transition cursor-pointer whitespace-nowrap shrink-0 ${
-              justManuallySaved
-                ? 'bg-[#22C55E]/15 border-[#22C55E]/60 text-[#4ADE80]'
-                : 'bg-[#202631] hover:bg-[#28303E] border-[#303744] text-[#F3F4F6]'
-            }`}
-          >
-            {justManuallySaved ? (
-              <Check className="w-3.5 h-3.5 text-[#4ADE80] stroke-[2.5]" />
-            ) : (
-              <Save className="w-3.5 h-3.5 text-[#60A5FA]" />
-            )}
-            <span className="hidden sm:inline">{justManuallySaved ? 'Saved' : 'Save'}</span>
-          </button>
-
-          {/* Preview Button */}
-          <button
-            data-testid="top-preview-btn"
-            onClick={() => {
-              const targetIdx = resolvePreviewInitialPageIndex(project.pages, activePageIndex);
-              setPreviewPageIndex(targetIdx);
-              setPreviewModalOpen(true);
-            }}
-            title="Preview book paper cover and interior pages"
-            className="h-8 sm:h-9 px-2.5 sm:px-3.5 bg-[#202631] hover:bg-[#28303E] border border-[#303744] text-[#F3F4F6] rounded-md text-xs sm:text-[13px] font-medium flex items-center gap-1.5 sm:gap-2 transition cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Play className="w-3.5 h-3.5 fill-current" />
-            <span className="hidden sm:inline">Preview</span>
-          </button>
-
-          {/* Prominent Blue Download PDF Button + Dropdown with Pre-Flight Validation */}
-          <div className="relative">
-            <button
-              onClick={() => setDownloadDropdownOpen(prev => !prev)}
-              disabled={isDownloading}
-              title="Validate specifications and export PDF"
-              className="h-8 sm:h-9 px-2.5 sm:px-4 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded-md text-xs sm:text-[13px] font-semibold flex items-center gap-1.5 sm:gap-2 shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Download className="w-4 h-4" />
-              <span className="hidden sm:inline">{isDownloading ? 'Exporting...' : 'Download PDF'}</span>
-              <span className="sm:hidden">{isDownloading ? '...' : 'PDF'}</span>
-            </button>
-
-            {downloadDropdownOpen && (
-              <div className="absolute right-0 top-11 w-92 bg-[#191D25] text-[#F3F4F6] rounded-lg shadow-2xl border border-[#303744] py-2 z-50">
-                <div className="px-3.5 pb-2 border-b border-[#303744]/70">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-[#F3F4F6]">Export Print-Ready PDF &amp; KDP Files</span>
-                    {kdpValidationReport.isValidForPrint ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22C55E] bg-[#22C55E]/10 px-2 py-0.5 rounded">
-                        <ShieldCheck className="w-3 h-3" /> Specs Validated
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3" /> {kdpValidationReport.warnings.length} Advisory
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-[#A1A9B8] mt-1 tabular-nums">
-                    Trim: {currentTrim.w}&quot; × {currentTrim.h}&quot; •{' '}
-                    {project.pages.filter(p => !p.isCover).length} Interior Pages • Bleed: {bleedInches}&quot;
-                  </div>
-
-                  {/* Pre-Flight Validation Warnings */}
-                  {kdpValidationReport.warnings.length > 0 && (
-                    <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 space-y-1">
-                      {kdpValidationReport.warnings.map((w, idx) => (
-                        <div key={idx} className="text-[10px] text-amber-300 flex items-start gap-1.5 leading-snug">
-                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-400" />
-                          <span>{w}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="py-1">
-                  <button
-                    onClick={() => handleDownloadChoice('project_cmyk')}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
-                  >
-                    <span>Download Current Project CMYK (Printed Books)</span>
-                    <span className="text-[11px] text-[#22C55E] font-semibold">Print PDF</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDownloadChoice('project_rgb')}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
-                  >
-                    <span>Download Current Project RGB (EBooks)</span>
-                    <span className="text-[11px] text-[#A1A9B8]">Digital</span>
-                  </button>
-
-                  <div className="h-px bg-[#303744] my-1" />
-
-                  <button
-                    onClick={() => handleDownloadChoice('cover_pdf')}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
-                  >
-                    <span>Download Full Cover Spread PDF</span>
-                    <span className="text-[11px] text-[#1677FF] font-semibold">{bleedInches}&quot; Bleed</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDownloadChoice('package')}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[#1677FF]/15 text-[#60A5FA] font-semibold text-xs transition flex items-center justify-between cursor-pointer"
-                  >
-                    <span>Download Complete KDP Package (Cover + Interior)</span>
-                    <span className="text-[11px] text-[#F3F4F6]">Bundle</span>
-                  </button>
-
-                  <div className="h-px bg-[#303744] my-1" />
-
-                  <button
-                    onClick={() => handleDownloadChoice('page_cmyk')}
-                    className="w-full text-left px-3.5 py-1.5 hover:bg-[#252B36] text-xs text-[#A1A9B8] hover:text-[#F3F4F6] transition cursor-pointer"
-                  >
-                    Download Current Page CMYK (Printed Books)
-                  </button>
-
-                  <button
-                    onClick={() => handleDownloadChoice('cover_svg')}
-                    className="w-full text-left px-3.5 py-1.5 hover:bg-[#252B36] text-xs text-[#A1A9B8] hover:text-[#F3F4F6] transition cursor-pointer"
-                  >
-                    Export Active Canvas as Vector SVG
-                  </button>
-                </div>
+        {currentView === 'editor' && (
+          <>
+            {/* Center Zone: Editable Project Name Box with Blue Pencil Icon */}
+            <div className="hidden sm:flex items-center justify-center">
+              <div className="w-[290px] h-9 bg-[#131720] border border-[#303744] focus-within:border-[#1677FF] rounded-md px-3.5 flex items-center justify-between transition-colors">
+                <input
+                  ref={titleInputRef}
+                  type="text"
+                  aria-label="Project Name"
+                  value={project.title}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setProject(prev => ({
+                      ...prev,
+                      title: val,
+                      lastSaved: 'Saved just now',
+                      updatedAt: Date.now(),
+                    }));
+                    setSaveStatusText('Saved just now');
+                  }}
+                  className="bg-transparent text-[#F3F4F6] font-medium text-[13px] w-full focus:outline-none truncate"
+                  placeholder="Enter project name..."
+                />
+                <button
+                  onClick={() => titleInputRef.current?.focus()}
+                  aria-label="Edit Project Name"
+                  title="Rename project"
+                  className="text-[#1677FF] hover:text-[#4096ff] ml-2 cursor-pointer shrink-0"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
               </div>
-            )}
-          </div>
-        </div>
+            </div>
+
+            {/* Right Zone: Undo/Redo, Autosave Status, Manual Save Button, Preview Button, Blue Download PDF Button */}
+            <div className="flex items-center gap-1.5 sm:gap-2.5">
+              <div className="flex items-center gap-0.5 sm:gap-1">
+                <button
+                  onClick={handleUndo}
+                  disabled={historyIndex <= 0}
+                  aria-label="Undo"
+                  title="Undo (Ctrl+Z)"
+                  className="p-1.5 sm:p-2 text-[#A1A9B8] hover:text-[#F3F4F6] hover:bg-[#252B36] disabled:opacity-40 rounded-md transition cursor-pointer"
+                >
+                  <Undo2 className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={historyIndex >= history.length - 1}
+                  aria-label="Redo"
+                  title="Redo (Ctrl+Y)"
+                  className="p-1.5 sm:p-2 text-[#A1A9B8] hover:text-[#F3F4F6] hover:bg-[#252B36] disabled:opacity-40 rounded-md transition cursor-pointer"
+                >
+                  <Redo2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Autosave status with green check circle */}
+              <div
+                data-testid="autosave-status-indicator"
+                title="All changes are automatically saved to local storage"
+                className="hidden lg:flex items-center gap-2 text-[12px] text-[#A1A9B8] px-1.5 whitespace-nowrap shrink-0"
+              >
+                <span className="w-4 h-4 rounded-full bg-[#22C55E] text-[#111318] flex items-center justify-center">
+                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                </span>
+                <span>{saveStatusText}</span>
+              </div>
+
+              {/* Manual Save Button (positioned immediately to the left of Preview button) */}
+              <button
+                type="button"
+                data-testid="manual-save-btn"
+                onClick={handleManualSave}
+                title="Save project now (Ctrl+S)"
+                className={`h-8 sm:h-9 px-2.5 sm:px-3.5 border rounded-md text-xs sm:text-[13px] font-medium flex items-center gap-1.5 sm:gap-2 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  justManuallySaved
+                    ? 'bg-[#22C55E]/15 border-[#22C55E]/60 text-[#4ADE80]'
+                    : 'bg-[#202631] hover:bg-[#28303E] border-[#303744] text-[#F3F4F6]'
+                }`}
+              >
+                {justManuallySaved ? (
+                  <Check className="w-3.5 h-3.5 text-[#4ADE80] stroke-[2.5]" />
+                ) : (
+                  <Save className="w-3.5 h-3.5 text-[#60A5FA]" />
+                )}
+                <span className="hidden sm:inline">{justManuallySaved ? 'Saved' : 'Save'}</span>
+              </button>
+
+              {/* Preview Button */}
+              <button
+                data-testid="top-preview-btn"
+                onClick={() => {
+                  const targetIdx = resolvePreviewInitialPageIndex(project.pages, activePageIndex);
+                  setPreviewPageIndex(targetIdx);
+                  setPreviewModalOpen(true);
+                }}
+                title="Preview book paper cover and interior pages"
+                className="h-8 sm:h-9 px-2.5 sm:px-3.5 bg-[#202631] hover:bg-[#28303E] border border-[#303744] text-[#F3F4F6] rounded-md text-xs sm:text-[13px] font-medium flex items-center gap-1.5 sm:gap-2 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span className="hidden sm:inline">Preview</span>
+              </button>
+
+              {/* Prominent Blue Download PDF Button + Dropdown with Pre-Flight Validation */}
+              <div className="relative">
+                <button
+                  onClick={() => setDownloadDropdownOpen(prev => !prev)}
+                  disabled={isDownloading}
+                  title="Validate specifications and export PDF"
+                  className="h-8 sm:h-9 px-2.5 sm:px-4 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded-md text-xs sm:text-[13px] font-semibold flex items-center gap-1.5 sm:gap-2 shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Download className="w-4 h-4" />
+                  <span className="hidden sm:inline">{isDownloading ? 'Exporting...' : 'Download PDF'}</span>
+                  <span className="sm:hidden">{isDownloading ? '...' : 'PDF'}</span>
+                </button>
+
+                {downloadDropdownOpen && (
+                  <div className="absolute right-0 top-11 w-92 bg-[#191D25] text-[#F3F4F6] rounded-lg shadow-2xl border border-[#303744] py-2 z-50">
+                    <div className="px-3.5 pb-2 border-b border-[#303744]/70">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-[#F3F4F6]">Export Print-Ready PDF &amp; KDP Files</span>
+                        {kdpValidationReport.isValidForPrint ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22C55E] bg-[#22C55E]/10 px-2 py-0.5 rounded">
+                            <ShieldCheck className="w-3 h-3" /> Specs Validated
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded">
+                            <AlertTriangle className="w-3 h-3" /> {kdpValidationReport.warnings.length} Advisory
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-[#A1A9B8] mt-1 tabular-nums">
+                        Trim: {currentTrim.w}&quot; × {currentTrim.h}&quot; •{' '}
+                        {project.pages.filter(p => !p.isCover).length} Interior Pages • Bleed: {bleedInches}&quot;
+                      </div>
+
+                      {/* Pre-Flight Validation Warnings */}
+                      {kdpValidationReport.warnings.length > 0 && (
+                        <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 space-y-1">
+                          {kdpValidationReport.warnings.map((w, idx) => (
+                            <div key={idx} className="text-[10px] text-amber-300 flex items-start gap-1.5 leading-snug">
+                              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-400" />
+                              <span>{w}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="py-1">
+                      <button
+                        onClick={() => handleDownloadChoice('project_cmyk')}
+                        className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
+                      >
+                        <span>Download Current Project CMYK (Printed Books)</span>
+                        <span className="text-[11px] text-[#22C55E] font-semibold">Print PDF</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleDownloadChoice('project_rgb')}
+                        className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
+                      >
+                        <span>Download Current Project RGB (EBooks)</span>
+                        <span className="text-[11px] text-[#A1A9B8]">Digital</span>
+                      </button>
+
+                      <div className="h-px bg-[#303744] my-1" />
+
+                      <button
+                        onClick={() => handleDownloadChoice('cover_pdf')}
+                        className="w-full text-left px-3.5 py-2 hover:bg-[#252B36] text-xs text-[#F3F4F6] transition flex items-center justify-between cursor-pointer"
+                      >
+                        <span>Download Full Cover Spread PDF</span>
+                        <span className="text-[11px] text-[#1677FF] font-semibold">{bleedInches}&quot; Bleed</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleDownloadChoice('package')}
+                        className="w-full text-left px-3.5 py-2 hover:bg-[#1677FF]/15 text-[#60A5FA] font-semibold text-xs transition flex items-center justify-between cursor-pointer"
+                      >
+                        <span>Download Complete KDP Package (Cover + Interior)</span>
+                        <span className="text-[11px] text-[#F3F4F6]">Bundle</span>
+                      </button>
+
+                      <div className="h-px bg-[#303744] my-1" />
+
+                      <button
+                        onClick={() => handleDownloadChoice('page_cmyk')}
+                        className="w-full text-left px-3.5 py-1.5 hover:bg-[#252B36] text-xs text-[#A1A9B8] hover:text-[#F3F4F6] transition cursor-pointer"
+                      >
+                        Download Current Page CMYK (Printed Books)
+                      </button>
+
+                      <button
+                        onClick={() => handleDownloadChoice('cover_svg')}
+                        className="w-full text-left px-3.5 py-1.5 hover:bg-[#252B36] text-xs text-[#A1A9B8] hover:text-[#F3F4F6] transition cursor-pointer"
+                      >
+                        Export Active Canvas as Vector SVG
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </header>
 
       {/* =====================================================================
-          DASHBOARD & PROJECT MANAGEMENT VIEW (When 'Dashboard' or 'Projects' clicked)
+          PROJECTS VIEW (When 'Projects' clicked — shows current + WIP & Completed projects)
          ===================================================================== */}
-      {currentView === 'dashboard' ? (
-        <main className="flex-1 overflow-y-auto bg-[#111318] p-8">
-          <div className="max-w-6xl mx-auto space-y-8">
+      {currentView === 'projects' ? (
+        <main data-testid="projects-list-view" className="flex-1 overflow-y-auto bg-[#111318] p-8">
+          <div className="max-w-6xl mx-auto space-y-6">
             {/* Top Header Row */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#303744] pb-6">
               <div>
-                <h1 className="text-2xl font-bold text-[#F3F4F6] tracking-tight">Your Book Projects</h1>
+                <h1 className="text-2xl font-bold text-[#F3F4F6] tracking-tight">My Projects</h1>
                 <p className="text-sm text-[#A1A9B8] mt-1">
-                  Create, manage, sort, and export print-ready Amazon KDP notebooks, journals, and planners.
+                  Your currently active book project alongside your work-in-progress and completed books.
                 </p>
               </div>
               <div className="flex items-center gap-3">
@@ -6692,26 +6833,66 @@ export const StudioModule: React.FC = () => {
                   className="px-4 py-2 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded-md text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-xs"
                 >
                   <FolderPlus className="w-4 h-4" />
-                  <span>Create New Book</span>
+                  <span>Create New Project</span>
                 </button>
               </div>
             </div>
 
-            {/* Search & Sort Filter Bar */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="relative w-72">
+            {/* Status Tabs + Search & Sort Filter Bar */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              {/* Status Filter Tabs */}
+              <div className="flex items-center gap-1.5 bg-[#171B23] p-1 rounded-lg border border-[#303744] w-fit">
+                <button
+                  type="button"
+                  data-testid="filter-projects-all"
+                  onClick={() => setProjectsStatusFilter('all')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium cursor-pointer transition ${
+                    projectsStatusFilter === 'all'
+                      ? 'bg-[#1677FF] text-white font-semibold'
+                      : 'text-[#A1A9B8] hover:text-[#F3F4F6]'
+                  }`}
+                >
+                  All Projects ({savedProjects.length})
+                </button>
+                <button
+                  type="button"
+                  data-testid="filter-projects-in-progress"
+                  onClick={() => setProjectsStatusFilter('in_progress')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium cursor-pointer transition ${
+                    projectsStatusFilter === 'in_progress'
+                      ? 'bg-[#1677FF] text-white font-semibold'
+                      : 'text-[#A1A9B8] hover:text-[#F3F4F6]'
+                  }`}
+                >
+                  Work in Progress (
+                  {savedProjects.filter(p => (p.projectStatus || 'in_progress') === 'in_progress').length})
+                </button>
+                <button
+                  type="button"
+                  data-testid="filter-projects-completed"
+                  onClick={() => setProjectsStatusFilter('completed')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium cursor-pointer transition ${
+                    projectsStatusFilter === 'completed'
+                      ? 'bg-[#1677FF] text-white font-semibold'
+                      : 'text-[#A1A9B8] hover:text-[#F3F4F6]'
+                  }`}
+                >
+                  Completed ({savedProjects.filter(p => p.projectStatus === 'completed').length})
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="relative w-64">
                   <Search className="w-4 h-4 text-[#A1A9B8] absolute left-3 top-2.5" />
                   <input
                     type="text"
                     value={dashboardSearch}
                     onChange={e => setDashboardSearch(e.target.value)}
-                    placeholder="Search saved books..."
+                    placeholder="Search projects..."
                     className="w-full bg-[#171B23] border border-[#303744] focus:border-[#1677FF] rounded-md pl-9 pr-3 py-2 text-xs text-[#F3F4F6] placeholder-[#A1A9B8] focus:outline-none"
                   />
                 </div>
 
-                {/* Dashboard Sort Dropdown */}
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-[#A1A9B8]">Sort by:</span>
                   <select
@@ -6725,19 +6906,26 @@ export const StudioModule: React.FC = () => {
                     <option value="pages">Page Count</option>
                   </select>
                 </div>
-              </div>
 
-              <div className="text-xs text-[#A1A9B8] tabular-nums">
-                {displayedDashboardProjects.length} of {savedProjects.length} saved projects in workspace
+                <div className="text-xs text-[#A1A9B8] tabular-nums">
+                  Showing {displayedDashboardProjects.length} of {savedProjects.length}
+                </div>
               </div>
             </div>
 
-            {/* Recent Projects Grid */}
-            <section>
-              <h2 className="text-sm font-semibold text-[#F3F4F6] mb-4">Recent Projects</h2>
+            {/* User-Created Projects List (Current + Work in Progress + Completed) */}
+            {displayedDashboardProjects.length === 0 ? (
+              <div className="bg-[#171B23] border border-[#303744] rounded-lg p-10 text-center space-y-3">
+                <div className="text-sm font-semibold text-[#F3F4F6]">No matching projects found</div>
+                <p className="text-xs text-[#A1A9B8]">
+                  Try switching status filters, clearing your search query, or creating a new book project.
+                </p>
+              </div>
+            ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
                 {displayedDashboardProjects.map(proj => {
                   const isCurrent = proj.id === project.id;
+                  const status = proj.projectStatus || 'in_progress';
                   const coverPage = proj.pages.find(p => p.isCover) || proj.pages[0];
                   const coverTitle =
                     coverPage?.elements.find(e => e.type === 'text')?.text || proj.title.toUpperCase();
@@ -6748,12 +6936,12 @@ export const StudioModule: React.FC = () => {
                   return (
                     <div
                       key={proj.id}
+                      data-testid={`project-card-${proj.id}`}
                       className={`bg-[#171B23] border rounded-lg p-4 flex flex-col justify-between transition ${
-                        isCurrent ? 'border-[#1677FF]' : 'border-[#303744] hover:border-[#4B5563]'
+                        isCurrent ? 'border-[#1677FF] ring-1 ring-[#1677FF]/30' : 'border-[#303744] hover:border-[#4B5563]'
                       }`}
                     >
                       <div>
-                        {/* Dynamic Miniature Spread Preview reflecting actual project content */}
                         <div
                           onClick={() => handleOpenProject(proj)}
                           className="h-36 bg-[#111318] border border-[#303744] rounded-md p-3 flex items-center justify-center cursor-pointer mb-3.5 relative"
@@ -6801,14 +6989,26 @@ export const StudioModule: React.FC = () => {
                             </div>
                           </div>
 
-                          {isCurrent && (
-                            <span className="absolute top-2 right-2 px-2 py-0.5 bg-[#1677FF] text-white text-[10px] font-semibold rounded">
-                              Active
+                          <div className="absolute top-2 left-2 right-2 flex items-center justify-between gap-1 pointer-events-none">
+                            {isCurrent ? (
+                              <span className="px-2 py-0.5 bg-[#1677FF] text-white text-[10px] font-semibold rounded shadow-xs">
+                                Current Project
+                              </span>
+                            ) : (
+                              <span />
+                            )}
+                            <span
+                              className={`px-2 py-0.5 text-[10px] font-semibold rounded shadow-xs ${
+                                status === 'completed'
+                                  ? 'bg-[#22C55E]/20 text-[#4ADE80] border border-[#22C55E]/40'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              }`}
+                            >
+                              {status === 'completed' ? 'Completed' : 'Work in Progress'}
                             </span>
-                          )}
+                          </div>
                         </div>
 
-                        {/* Project Title or Inline Rename Input */}
                         {isRenaming ? (
                           <div className="flex items-center gap-1.5 mb-1">
                             <input
@@ -6838,11 +7038,22 @@ export const StudioModule: React.FC = () => {
                                 Pages · {proj.lastSaved}
                               </div>
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleProjectStatus(proj.id)}
+                              title={
+                                status === 'completed'
+                                  ? 'Mark as Work in Progress'
+                                  : 'Mark project as Completed'
+                              }
+                              className="text-[11px] px-2 py-0.5 rounded bg-[#252B36] hover:bg-[#303744] text-[#A1A9B8] hover:text-[#F3F4F6] cursor-pointer shrink-0 transition"
+                            >
+                              {status === 'completed' ? 'Mark WIP' : 'Mark Done'}
+                            </button>
                           </div>
                         )}
                       </div>
 
-                      {/* Delete Confirmation Prompt OR Standard Card Actions */}
                       {isConfirmingDelete ? (
                         <div className="mt-4 pt-3 border-t border-[#303744] flex items-center justify-between gap-2 bg-rose-950/20 -mx-2 px-2 py-1.5 rounded">
                           <span className="text-[11px] text-rose-300 font-medium">Permanently delete?</span>
@@ -6867,7 +7078,7 @@ export const StudioModule: React.FC = () => {
                             onClick={() => handleOpenProject(proj)}
                             className="px-3 py-1.5 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded text-xs font-semibold cursor-pointer transition"
                           >
-                            Open in Editor
+                            {isCurrent ? 'Continue Editing' : 'Open in Editor'}
                           </button>
                           <div className="flex items-center gap-1">
                             <button
@@ -6904,11 +7115,180 @@ export const StudioModule: React.FC = () => {
                   );
                 })}
               </div>
-            </section>
+            )}
+          </div>
+        </main>
+      ) : currentView === 'dashboard' ? (
+        /* =====================================================================
+            DASHBOARD OVERVIEW (When 'Dashboard' clicked — shows preview of current project + quick start)
+           ===================================================================== */
+        <main data-testid="dashboard-overview-view" className="flex-1 overflow-y-auto bg-[#111318] p-8">
+          <div className="max-w-6xl mx-auto space-y-8">
+            {/* Top Header Row */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#303744] pb-6">
+              <div>
+                <h1 className="text-2xl font-bold text-[#F3F4F6] tracking-tight">Workspace Dashboard</h1>
+                <p className="text-sm text-[#A1A9B8] mt-1">
+                  Preview the project you are currently working on, or start a new Amazon KDP book project.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCurrentView('projects')}
+                  className="px-4 py-2 bg-[#171B23] hover:bg-[#252B36] border border-[#303744] text-[#F3F4F6] rounded-md text-xs font-medium cursor-pointer transition"
+                >
+                  All Projects ({savedProjects.length})
+                </button>
+                <button
+                  onClick={() => setCurrentView('editor')}
+                  className="px-4 py-2 bg-[#252B36] hover:bg-[#303744] border border-[#303744] text-[#F3F4F6] rounded-md text-xs font-medium cursor-pointer transition"
+                >
+                  Return to Active Editor
+                </button>
+                <button
+                  onClick={() => handleCreateNewProject('New KDP Notebook', '6x9', 'lined')}
+                  className="px-4 py-2 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded-md text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-xs"
+                >
+                  <FolderPlus className="w-4 h-4" />
+                  <span>Create New Book</span>
+                </button>
+              </div>
+            </div>
 
-            {/* Quick-Start Template Starters */}
+            {/* Currently Working On — Visual Preview of Active Project */}
+            {(() => {
+              const activeCoverPage = project.pages.find(p => p.isCover) || project.pages[0];
+              const activeCoverTitle =
+                activeCoverPage?.elements.find(e => e.type === 'text')?.text || project.title.toUpperCase();
+              const activeFirstInterior = project.pages.find(p => !p.isCover);
+              const activeStatus = project.projectStatus || 'in_progress';
+
+              return (
+                <section data-testid="dashboard-current-project-preview" className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-[#F3F4F6]">
+                      Project Currently Being Worked On
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => setCurrentView('projects')}
+                      className="text-xs text-[#60A5FA] hover:text-[#93C5FD] font-medium cursor-pointer transition"
+                    >
+                      View all {savedProjects.length} projects (Work in Progress &amp; Completed) →
+                    </button>
+                  </div>
+
+                  <div className="bg-[#171B23] border border-[#1677FF] rounded-lg p-5 flex flex-col md:flex-row items-center justify-between gap-6 shadow-md">
+                    <div className="flex flex-col sm:flex-row items-center gap-5 w-full md:w-auto">
+                      {/* Visual Miniature Spread Preview of Current Project */}
+                      <div
+                        onClick={() => setCurrentView('editor')}
+                        title="Click to return to editing this project"
+                        className="w-60 h-40 bg-[#111318] border border-[#303744] rounded-md p-3 flex items-center justify-center cursor-pointer relative shrink-0 hover:border-[#1677FF] transition"
+                      >
+                        <div className="w-48 h-32 bg-white rounded-xs shadow-md flex overflow-hidden border border-slate-300">
+                          <div
+                            style={{ backgroundColor: activeFirstInterior?.backgroundColor || '#FFFFFF' }}
+                            className="w-1/2 border-r border-slate-200 p-2.5 flex flex-col justify-center gap-1.5"
+                          >
+                            {activeFirstInterior?.templateType === 'dotgrid' ? (
+                              <div className="grid grid-cols-4 gap-1 p-1">
+                                {Array.from({ length: 12 }).map((_, i) => (
+                                  <div key={i} className="w-0.5 h-0.5 rounded-full bg-slate-400" />
+                                ))}
+                              </div>
+                            ) : (
+                              <>
+                                <div className="h-1 w-3/4 bg-slate-200" />
+                                <div className="h-1 w-1/2 bg-red-200" />
+                                <div className="h-1 w-2/3 bg-blue-200" />
+                                <div className="h-1 w-4/5 bg-slate-200" />
+                              </>
+                            )}
+                          </div>
+                          <div
+                            style={{ backgroundColor: activeCoverPage?.backgroundColor || '#FFFFFF' }}
+                            className="w-1/2 p-2.5 flex flex-col items-center justify-center text-center relative overflow-hidden"
+                          >
+                            {activeCoverPage?.elements
+                              .filter(e => e.type === 'image' && e.imageUrl)
+                              .map(img => (
+                                <img
+                                  key={img.id}
+                                  src={img.imageUrl}
+                                  alt={img.imageAlt || 'Cover'}
+                                  className="w-8 h-8 object-contain mb-0.5 pointer-events-none"
+                                />
+                              ))}
+                            <div className="text-[8px] font-serif font-bold text-slate-900 tracking-wider truncate max-w-full relative z-10">
+                              {activeCoverTitle}
+                            </div>
+                            <div className="w-5 h-px bg-slate-400 my-1 relative z-10" />
+                            <div className="text-[6px] text-slate-500 uppercase relative z-10">
+                              {currentTrim.w}×{currentTrim.h}&quot; • {project.pages.length}p
+                            </div>
+                          </div>
+                        </div>
+
+                        <span className="absolute top-2 left-2 px-2 py-0.5 bg-[#1677FF] text-white text-[10px] font-semibold rounded">
+                          Active Preview
+                        </span>
+                      </div>
+
+                      {/* Active Project Details */}
+                      <div className="space-y-2 text-center sm:text-left">
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                          <span className="px-2 py-0.5 bg-[#1677FF]/15 text-[#60A5FA] border border-[#1677FF]/30 text-[11px] font-semibold rounded">
+                            Currently Working On
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 text-[11px] font-semibold rounded ${
+                              activeStatus === 'completed'
+                                ? 'bg-[#22C55E]/15 text-[#4ADE80]'
+                                : 'bg-amber-500/15 text-amber-300'
+                            }`}
+                          >
+                            {activeStatus === 'completed' ? 'Completed' : 'Work in Progress'}
+                          </span>
+                        </div>
+                        <h3 className="text-lg font-bold text-[#F3F4F6]">{project.title}</h3>
+                        <p className="text-xs text-[#A1A9B8] tabular-nums">
+                          {currentTrim.w}&quot; × {currentTrim.h}&quot; KDP Trim Size · {project.pages.length} Total Pages (
+                          {project.pages.filter(p => !p.isCover).length} Interior + 1 Full Cover Spread) · {saveStatusText}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const targetIdx = resolvePreviewInitialPageIndex(project.pages, activePageIndex);
+                          setPreviewPageIndex(targetIdx);
+                          setPreviewModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 bg-[#252B36] hover:bg-[#303744] border border-[#303744] text-[#F3F4F6] rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>Flipbook Preview</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('editor')}
+                        className="px-4 py-2 bg-[#1677FF] hover:bg-[#1668dc] text-white rounded-md text-xs font-semibold cursor-pointer transition shadow-xs"
+                      >
+                        Continue Editing in Studio
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              );
+            })()}
+
+            {/* Quick-Start Book Format Presets */}
             <section>
-              <h2 className="text-sm font-semibold text-[#F3F4F6] mb-4">Start from a KDP Book Template</h2>
+              <h2 className="text-sm font-semibold text-[#F3F4F6] mb-4">Start a New KDP Book Project</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {[
                   {
@@ -6948,7 +7328,7 @@ export const StudioModule: React.FC = () => {
                       onClick={() => handleCreateNewProject(item.title, item.trim, item.tmpl)}
                       className="mt-4 w-full py-1.5 bg-[#252B36] hover:bg-[#1677FF] text-[#F3F4F6] hover:text-white rounded text-xs font-semibold cursor-pointer transition"
                     >
-                      Use Template
+                      Create Book
                     </button>
                   </div>
                 ))}
@@ -8177,10 +8557,18 @@ export const StudioModule: React.FC = () => {
                       <button
                         onClick={() => handleFitElementToPaperCover('front_cover')}
                         disabled={selectedElement.locked}
-                        title="Fit image to Front Paper Cover"
+                        title="Fit image flush to Front Paper Cover (Right half)"
                         className="px-1.5 py-0.5 bg-[#1677FF]/20 hover:bg-[#1677FF] border border-[#1677FF]/50 text-[#60A5FA] hover:text-white disabled:opacity-40 rounded text-[10px] font-semibold cursor-pointer transition whitespace-nowrap"
                       >
                         Fit Front Cover
+                      </button>
+                      <button
+                        onClick={() => handleFitElementToPaperCover('back_cover')}
+                        disabled={selectedElement.locked}
+                        title="Fit image flush to Back Paper Cover (Left half)"
+                        className="px-1.5 py-0.5 bg-purple-500/20 hover:bg-purple-600 border border-purple-500/50 text-purple-300 hover:text-white disabled:opacity-40 rounded text-[10px] font-semibold cursor-pointer transition whitespace-nowrap"
+                      >
+                        Fit Back Cover
                       </button>
                     </>
                   )}
@@ -8557,12 +8945,12 @@ export const StudioModule: React.FC = () => {
                         {/* BLEED, TRIM & SAFE MARGIN GUIDES (Matching PageForge reference image) */}
                         {showGuides && (
                           <g pointerEvents="none">
-                            {/* Outer Red Dashed Bleed Border */}
+                            {/* Outer Red Dashed Bleed Border (aligned to true outer boundary so images fit flush) */}
                             <rect
-                              x="6"
-                              y="6"
-                              width={coverSpecs.totalWidth * 100 - 12}
-                              height={coverSpecs.totalHeight * 100 - 12}
+                              x="1"
+                              y="1"
+                              width={coverSpecs.totalWidth * 100 - 2}
+                              height={coverSpecs.totalHeight * 100 - 2}
                               fill="none"
                               stroke="#EF4444"
                               strokeWidth="1.8"
@@ -8743,10 +9131,10 @@ export const StudioModule: React.FC = () => {
                         {showGuides && (
                           <>
                             <rect
-                              x="4"
-                              y="4"
-                              width="424"
-                              height="640"
+                              x="1"
+                              y="1"
+                              width="430"
+                              height="646"
                               fill="none"
                               stroke="#EF4444"
                               strokeWidth="1.2"
@@ -9260,13 +9648,20 @@ export const StudioModule: React.FC = () => {
                             Fit Front Cover
                           </button>
                           <button
-                            onClick={() => handleFitElementToPaperCover('full_wrap')}
+                            onClick={() => handleFitElementToPaperCover('back_cover')}
                             disabled={selectedElement.locked}
-                            className="py-1.5 bg-[#202631] hover:bg-[#252B36] border border-[#303744] text-[#F3F4F6] rounded text-[11px] font-semibold cursor-pointer transition"
+                            className="py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-[11px] font-semibold cursor-pointer transition"
                           >
-                            Fit Full Spread
+                            Fit Back Cover
                           </button>
                         </div>
+                        <button
+                          onClick={() => handleFitElementToPaperCover('full_wrap')}
+                          disabled={selectedElement.locked}
+                          className="w-full py-1.5 bg-[#202631] hover:bg-[#252B36] border border-[#303744] text-[#F3F4F6] rounded text-[11px] font-semibold cursor-pointer transition"
+                        >
+                          Fit Full Spread (Wrap-Around)
+                        </button>
                         <button
                           onClick={handleStretchElementToBottom}
                           disabled={selectedElement.locked}
@@ -10075,7 +10470,7 @@ export const StudioModule: React.FC = () => {
                       <div className="flex flex-col items-center gap-2.5">
                         <div
                           style={{ backgroundColor: coverPage?.backgroundColor || '#FFFFFF' }}
-                          className="w-[285px] h-[420px] bg-white rounded-r-md rounded-l-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] border border-slate-300 overflow-hidden relative"
+                          className="w-[285px] h-[420px] bg-white rounded-r-md rounded-l-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] overflow-hidden relative"
                         >
                           <svg
                             data-testid="preview-front-cover-svg"
@@ -10103,7 +10498,7 @@ export const StudioModule: React.FC = () => {
                       <div className="flex flex-col items-center gap-2.5">
                         <div
                           style={{ backgroundColor: coverPage?.backgroundColor || '#FFFFFF' }}
-                          className="w-[285px] h-[420px] bg-white rounded-l-md rounded-r-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] border border-slate-300 overflow-hidden relative"
+                          className="w-[285px] h-[420px] bg-white rounded-l-md rounded-r-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] overflow-hidden relative"
                         >
                           <svg
                             data-testid="preview-back-cover-svg"
@@ -10134,7 +10529,7 @@ export const StudioModule: React.FC = () => {
                       <div className="flex flex-col items-center gap-2">
                         <div
                           style={{ backgroundColor: coverPage?.backgroundColor || '#FFFFFF' }}
-                          className="w-[240px] h-[360px] bg-white rounded-r-md rounded-l-xs shadow-2xl border border-slate-300 overflow-hidden relative"
+                          className="w-[240px] h-[360px] bg-white rounded-r-md rounded-l-xs shadow-2xl overflow-hidden relative"
                         >
                           <svg
                             data-testid="preview-sidebyside-cover-svg"
@@ -10211,7 +10606,7 @@ export const StudioModule: React.FC = () => {
                       <div className="flex flex-col items-center gap-2">
                         <div
                           style={{ backgroundColor: coverPage?.backgroundColor || '#FFFFFF' }}
-                          className="w-[240px] h-[360px] bg-white rounded-l-md rounded-r-xs shadow-2xl border border-slate-300 overflow-hidden relative"
+                          className="w-[240px] h-[360px] bg-white rounded-l-md rounded-r-xs shadow-2xl overflow-hidden relative"
                         >
                           <svg
                             data-testid="preview-sidebyside-back-svg"
@@ -10237,12 +10632,16 @@ export const StudioModule: React.FC = () => {
                     /* FULL WRAP-AROUND PAPER COVER SPREAD (Back Cover + Spine + Front Cover + All Images & Elements) */
                     <div className="flex flex-col items-center gap-3 w-full">
                       <div
-                        style={{ backgroundColor: coverPage?.backgroundColor || '#FFFFFF' }}
-                        className="w-full max-w-[660px] aspect-[1.33/1] bg-white rounded-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] border border-slate-300 overflow-hidden relative"
+                        style={{
+                          backgroundColor: coverPage?.backgroundColor || '#FFFFFF',
+                          aspectRatio: `${coverSpecs.totalWidth} / ${coverSpecs.totalHeight}`,
+                        }}
+                        className="w-full max-w-[660px] bg-white rounded-xs shadow-[0_25px_60px_rgba(0,0,0,0.75)] overflow-hidden relative"
                       >
                         <svg
                           data-testid="preview-cover-svg"
                           viewBox={`0 0 ${coverSpecs.totalWidth * 100} ${coverSpecs.totalHeight * 100}`}
+                          preserveAspectRatio="none"
                           className="w-full h-full block relative z-0"
                         >
                           <defs>

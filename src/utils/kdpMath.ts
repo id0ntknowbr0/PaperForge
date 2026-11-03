@@ -834,6 +834,8 @@ export type PaperCoverPlacementTarget = 'front_cover' | 'back_cover' | 'full_wra
 /**
  * Calculates percentage coordinates (x, y, width, height) to fit an image onto the
  * Front Paper Cover, Back Paper Cover, Full Wrap-Around Cover Spread, or Centered Front Emblem.
+ * Front and Back cover placements meet flush at 50% (center spine) and extend to 0% / 100%
+ * outer bleed boundaries so no white line is ever visible.
  */
 export function calculatePaperCoverPlacementBox(params: {
   target: PaperCoverPlacementTarget;
@@ -850,26 +852,17 @@ export function calculatePaperCoverPlacementBox(params: {
     return { x: 0, y: 0, width: 100, height: 100 };
   }
 
-  const backRightIn = bleedMarginIn + trimWidthIn;
-  const spineRightIn = backRightIn + spineWidthIn;
-
   if (target === 'back_cover') {
-    const backWidthPct = Number(((backRightIn / safeTotalW) * 100).toFixed(2));
-    return { x: 0, y: 0, width: Math.max(10, Math.min(100, backWidthPct)), height: 100 };
+    return { x: 0, y: 0, width: 50, height: 100 };
   }
 
   if (target === 'front_cover') {
-    const frontStartPct = Number(((spineRightIn / safeTotalW) * 100).toFixed(2));
-    const frontWidthPct = Number((100 - frontStartPct).toFixed(2));
-    return {
-      x: Math.max(0, Math.min(90, frontStartPct)),
-      y: 0,
-      width: Math.max(10, Math.min(100, frontWidthPct)),
-      height: 100,
-    };
+    return { x: 50, y: 0, width: 50, height: 100 };
   }
 
   // 'front_center'
+  const backRightIn = bleedMarginIn + trimWidthIn;
+  const spineRightIn = backRightIn + spineWidthIn;
   const frontCenterIn = spineRightIn + trimWidthIn / 2;
   const frontCenterPct = (frontCenterIn / safeTotalW) * 100;
   const defaultW = 22;
@@ -879,6 +872,64 @@ export function calculatePaperCoverPlacementBox(params: {
     y: 20,
     width: defaultW,
     height: defaultH,
+  };
+}
+
+/**
+ * Normalizes a cover image element's bounding box so that images sized to fit the
+ * Front Cover, Back Cover, or Full Wrap-Around Spread snap flush to the template
+ * boundaries (0%, 50%, 100%) without leaving a 1-4% white gap along any edge.
+ */
+export function snapCoverImageElementToBounds<
+  T extends { type: string; x: number; y: number; width: number; height: number }
+>(el: T): T {
+  if (!el || el.type !== 'image') return el;
+
+  let x = el.x;
+  let y = el.y;
+  let right = el.x + el.width;
+  let bottom = el.y + el.height;
+
+  const isNearFullHeight = el.height >= 85 || (y <= 6 && bottom >= 90);
+  if (isNearFullHeight) {
+    y = 0;
+    bottom = 100;
+  } else {
+    if (y > -6 && y <= 3.5) y = 0;
+    if (bottom >= 96.5 && bottom < 106) bottom = 100;
+  }
+
+  // Full-wrap spread or full single-page width
+  if (el.width >= 85 || (x <= 6 && right >= 92)) {
+    x = 0;
+    right = 100;
+  } else if (el.width >= 40) {
+    // Front cover panel (right half of spread: ~50%..100%)
+    if (x >= 43 && x <= 56 && right >= 90) {
+      x = 50;
+      right = 100;
+    }
+    // Back cover panel (left half of spread: ~0%..50%)
+    else if (x <= 6 && right >= 43 && right <= 57) {
+      x = 0;
+      right = 50;
+    } else {
+      if (x > -6 && x <= 3.5) x = 0;
+      if (Math.abs(x - 50) <= 3.5) x = 50;
+      if (Math.abs(right - 50) <= 3.5) right = 50;
+      if (right >= 96.5 && right < 106) right = 100;
+    }
+  }
+
+  const width = Number(Math.max(1, right - x).toFixed(2));
+  const height = Number(Math.max(1, bottom - y).toFixed(2));
+
+  return {
+    ...el,
+    x: Number(x.toFixed(2)),
+    y: Number(y.toFixed(2)),
+    width,
+    height,
   };
 }
 
@@ -904,14 +955,16 @@ export function resolvePreviewInitialPageIndex(
  * Resolves the ordered list of elements to render on the Cover Spread in Preview mode and PDF export.
  * Collects all cover elements from Page 1 (index 0) plus any paper cover images placed on interior pages
  * (such as Page 2, the notebook template spread, or the final page), ensuring both Front and Back cover
- * images are always visible on top of default placeholder elements.
+ * images are always visible on top of default placeholder elements and snapped flush with zero white gaps.
  */
 export function resolveCoverPreviewElements<
   T extends { id: string; type: string; x: number; y: number; width: number; height: number }
 >(pages: { isCover?: boolean; elements: T[] }[]): T[] {
   if (!pages || pages.length === 0) return [];
   const coverElements = [...(pages[0]?.elements || [])];
-  const coverImageElements = coverElements.filter(e => e.type === 'image').map(e => ({ ...e }));
+  const coverImageElements = coverElements
+    .filter(e => e.type === 'image')
+    .map(e => snapCoverImageElementToBounds({ ...e }));
   const seenIds = new Set(coverElements.map(e => e.id));
 
   // Gather any images placed on interior pages (e.g. when user inserted paper cover images on the notebook template page)
@@ -921,7 +974,7 @@ export function resolveCoverPreviewElements<
     for (const el of pElems) {
       if (el.type === 'image' && !seenIds.has(el.id)) {
         seenIds.add(el.id);
-        interiorImagesWithPage.push({ el: { ...el }, pageIdx: i });
+        interiorImagesWithPage.push({ el: snapCoverImageElementToBounds({ ...el }), pageIdx: i });
       }
     }
   }
@@ -939,6 +992,7 @@ export function resolveCoverPreviewElements<
     if (cameFromInterior && onlyImg.x >= 18 && onlyImg.x <= 42 && onlyImg.width <= 60) {
       onlyImg.x = Number(Math.min(95 - onlyImg.width, 52 + (48 - onlyImg.width) / 2).toFixed(2));
     }
+    allImages[0] = snapCoverImageElementToBounds(onlyImg);
   } else if (allImages.length >= 2) {
     // Check if we already have at least one image on the Back Cover (left half, center < 50)
     // and at least one image on the Front Cover (right half, center >= 50) without full-wrap overlap
@@ -951,17 +1005,20 @@ export function resolveCoverPreviewElements<
     const bothOnLeft = firstCenter < 50 && secondCenter < 50;
 
     if (bothFullWrap || bothOnRight || bothOnLeft) {
-      // Place first image on Front Cover (right half) and second image on Back Cover (left half)
-      allImages[0] = {
+      // Place first image flush on Front Cover (50..100%) and second image flush on Back Cover (0..50%)
+      allImages[0] = snapCoverImageElementToBounds({
         ...first,
-        x: first.width >= 45 ? 50.5 : Math.max(51, first.x),
-        width: first.width >= 45 ? 49.5 : Math.min(47, Math.max(35, first.width)),
-      };
-      allImages[1] = {
+        x: first.width >= 40 ? 50 : Math.max(50, first.x),
+        width: first.width >= 40 ? 50 : Math.min(50, Math.max(35, first.width)),
+      });
+      allImages[1] = snapCoverImageElementToBounds({
         ...second,
-        x: second.width >= 45 ? 0 : 2,
-        width: second.width >= 45 ? 49.5 : Math.min(47, Math.max(35, second.width)),
-      };
+        x: second.width >= 40 ? 0 : 2,
+        width: second.width >= 40 ? 50 : Math.min(50, Math.max(35, second.width)),
+      });
+    } else {
+      allImages[0] = snapCoverImageElementToBounds(first);
+      allImages[1] = snapCoverImageElementToBounds(second);
     }
   }
 
@@ -972,6 +1029,7 @@ export function resolveCoverPreviewElements<
 /**
  * Extracts and remaps elements from the 2-page Cover Spread (0..100% of totalWidth)
  * onto a standalone Single-Page Front Cover or Back Cover (0..100% of single trim width).
+ * Ensures any cover image fitted to the Front or Back cover fills 0..100% completely with zero white lines.
  */
 export function extractSingleCoverPageElements<
   T extends { id: string; type: string; x: number; y: number; width: number; height: number }
@@ -993,15 +1051,19 @@ export function extractSingleCoverPageElements<
 
   const result: T[] = [];
 
-  for (const el of elements) {
+  for (const rawEl of elements) {
+    const el = rawEl.type === 'image' ? snapCoverImageElementToBounds(rawEl) : rawEl;
     const centerX = el.x + el.width / 2;
     const isFullWrap = el.x <= 15 && el.x + el.width >= 85;
 
     if (isFullWrap) {
+      const fullHeight = el.type === 'image' && el.height >= 85;
       result.push({
         ...el,
         x: 0,
+        y: fullHeight ? 0 : el.y,
         width: 100,
+        height: fullHeight ? 100 : el.height,
       });
       continue;
     }
@@ -1010,22 +1072,70 @@ export function extractSingleCoverPageElements<
       if (centerX >= 45 || el.x + el.width > 55) {
         const mappedX = ((el.x - frontStartPct) / frontWidthPct) * 100;
         const mappedW = Math.max(5, (el.width / frontWidthPct) * 100);
-        result.push({
-          ...el,
-          x: Number(mappedX.toFixed(2)),
-          width: Number(mappedW.toFixed(2)),
-        });
+        if (el.type === 'image') {
+          const isFullPanelWidth =
+            el.width >= 40 || mappedW >= 84 || (el.x >= 43 && el.x <= 56 && el.x + el.width >= 90);
+          const isFullPanelHeight = el.height >= 85 || (el.y <= 6 && el.y + el.height >= 90);
+          let finalX = isFullPanelWidth ? 0 : mappedX;
+          let finalRight = isFullPanelWidth ? 100 : mappedX + mappedW;
+          if (finalX > -8 && finalX <= 6) finalX = 0;
+          if (finalRight >= 94 && finalRight < 108) finalRight = 100;
+          const finalY = isFullPanelHeight ? 0 : el.y <= 4 ? 0 : el.y;
+          const finalH = isFullPanelHeight
+            ? 100
+            : el.y + el.height >= 96
+            ? 100 - finalY
+            : el.height;
+
+          result.push({
+            ...el,
+            x: Number(finalX.toFixed(2)),
+            y: Number(finalY.toFixed(2)),
+            width: Number(Math.max(5, finalRight - finalX).toFixed(2)),
+            height: Number(Math.max(5, finalH).toFixed(2)),
+          });
+        } else {
+          result.push({
+            ...el,
+            x: Number(mappedX.toFixed(2)),
+            width: Number(mappedW.toFixed(2)),
+          });
+        }
       }
     } else {
       // side === 'back'
       if (centerX < 50 || el.x < 45) {
         const mappedX = (el.x / Math.max(10, backWidthPct)) * 100;
         const mappedW = Math.max(5, (el.width / Math.max(10, backWidthPct)) * 100);
-        result.push({
-          ...el,
-          x: Number(mappedX.toFixed(2)),
-          width: Number(mappedW.toFixed(2)),
-        });
+        if (el.type === 'image') {
+          const isFullPanelWidth =
+            el.width >= 40 || mappedW >= 84 || (el.x <= 6 && el.x + el.width >= 43);
+          const isFullPanelHeight = el.height >= 85 || (el.y <= 6 && el.y + el.height >= 90);
+          let finalX = isFullPanelWidth ? 0 : mappedX;
+          let finalRight = isFullPanelWidth ? 100 : mappedX + mappedW;
+          if (finalX > -8 && finalX <= 6) finalX = 0;
+          if (finalRight >= 94 && finalRight < 108) finalRight = 100;
+          const finalY = isFullPanelHeight ? 0 : el.y <= 4 ? 0 : el.y;
+          const finalH = isFullPanelHeight
+            ? 100
+            : el.y + el.height >= 96
+            ? 100 - finalY
+            : el.height;
+
+          result.push({
+            ...el,
+            x: Number(finalX.toFixed(2)),
+            y: Number(finalY.toFixed(2)),
+            width: Number(Math.max(5, finalRight - finalX).toFixed(2)),
+            height: Number(Math.max(5, finalH).toFixed(2)),
+          });
+        } else {
+          result.push({
+            ...el,
+            x: Number(mappedX.toFixed(2)),
+            width: Number(mappedW.toFixed(2)),
+          });
+        }
       }
     }
   }
@@ -1061,6 +1171,7 @@ export function extractSingleCoverPageElements<
 
   return result;
 }
+
 
 export type IndexTemplateStyle =
   | 'index_classic'

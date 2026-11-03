@@ -19,6 +19,7 @@ import {
   bulkAddInteriorPages,
   setBookTotalPageCount,
   calculatePaperCoverPlacementBox,
+  snapCoverImageElementToBounds,
   resolvePreviewInitialPageIndex,
   resolveCoverPreviewElements,
   extractSingleCoverPageElements,
@@ -523,7 +524,7 @@ test('bulkAddInteriorPages and setBookTotalPageCount accurately bulk-add and set
   assert.equal(twentyFourPages[23].pageNumber, 24);
 });
 
-test('calculatePaperCoverPlacementBox computes accurate Front, Back, and Full Wrap paper cover boxes', () => {
+test('calculatePaperCoverPlacementBox computes flush Front, Back, and Full Wrap paper cover boxes with zero white gap', () => {
   const front = calculatePaperCoverPlacementBox({
     target: 'front_cover',
     totalWidthIn: 12.304,
@@ -532,10 +533,7 @@ test('calculatePaperCoverPlacementBox computes accurate Front, Back, and Full Wr
     trimWidthIn: 6.0,
     spineWidthIn: 0.054,
   });
-  assert.ok(front.x > 49 && front.x < 52);
-  assert.equal(front.y, 0);
-  assert.ok(front.width > 48 && front.width < 51);
-  assert.equal(front.height, 100);
+  assert.deepEqual(front, { x: 50, y: 0, width: 50, height: 100 });
 
   const back = calculatePaperCoverPlacementBox({
     target: 'back_cover',
@@ -545,10 +543,7 @@ test('calculatePaperCoverPlacementBox computes accurate Front, Back, and Full Wr
     trimWidthIn: 6.0,
     spineWidthIn: 0.054,
   });
-  assert.equal(back.x, 0);
-  assert.equal(back.y, 0);
-  assert.ok(back.width > 49 && back.width < 51);
-  assert.equal(back.height, 100);
+  assert.deepEqual(back, { x: 0, y: 0, width: 50, height: 100 });
 
   const full = calculatePaperCoverPlacementBox({
     target: 'full_wrap',
@@ -561,7 +556,42 @@ test('calculatePaperCoverPlacementBox computes accurate Front, Back, and Full Wr
   assert.deepEqual(full, { x: 0, y: 0, width: 100, height: 100 });
 });
 
-test('resolvePreviewInitialPageIndex, resolveCoverPreviewElements, and extractSingleCoverPageElements ensure front and back cover images are shown in preview and PDF', () => {
+test('resolvePreviewInitialPageIndex, snapCoverImageElementToBounds, resolveCoverPreviewElements, and extractSingleCoverPageElements ensure front and back cover images fill 100% with zero white lines', () => {
+  // Verify slightly short manually-resized front and back cover images snap flush to 50..100% and 0..50%
+  const slightlyShortFront = snapCoverImageElementToBounds({
+    id: 'short-front',
+    type: 'image',
+    x: 51.8,
+    y: 0.8,
+    width: 47.6,
+    height: 98.4,
+  });
+  assert.deepEqual(slightlyShortFront, {
+    id: 'short-front',
+    type: 'image',
+    x: 50,
+    y: 0,
+    width: 50,
+    height: 100,
+  });
+
+  const slightlyShortBack = snapCoverImageElementToBounds({
+    id: 'short-back',
+    type: 'image',
+    x: 0.9,
+    y: 0.5,
+    width: 47.8,
+    height: 98.5,
+  });
+  assert.deepEqual(slightlyShortBack, {
+    id: 'short-back',
+    type: 'image',
+    x: 0,
+    y: 0,
+    width: 50,
+    height: 100,
+  });
+
   const pagesWithCoverImage = [
     {
       isCover: true,
@@ -583,8 +613,8 @@ test('resolvePreviewInitialPageIndex, resolveCoverPreviewElements, and extractSi
   assert.equal(resolvedCover.length, 2);
   assert.equal(resolvedCover[1].id, 'img-cover');
 
-  // If user inserted paper cover images on an interior template page (index 1) or split across Page 1 and Page 2,
-  // resolvePreviewInitialPageIndex always opens on index 0 (Cover Spread) and resolveCoverPreviewElements merges both.
+  // If user inserted paper cover images that were slightly short (e.g. x=52, width=48),
+  // resolveCoverPreviewElements snaps them flush to 50..100% and 0..50%
   const pagesWithSplitFrontAndBackImages = [
     {
       isCover: true,
@@ -603,10 +633,12 @@ test('resolvePreviewInitialPageIndex, resolveCoverPreviewElements, and extractSi
   assert.equal(mergedElements.length, 3);
   const frontEl = mergedElements.find(e => e.id === 'img-front')!;
   const backEl = mergedElements.find(e => e.id === 'img-back')!;
-  assert.ok(frontEl.x >= 50);
-  assert.ok(backEl.x < 10);
+  assert.equal(frontEl.x, 50);
+  assert.equal(frontEl.width, 50);
+  assert.equal(backEl.x, 0);
+  assert.equal(backEl.width, 50);
 
-  // Extract standalone Front Cover and Back Cover pages for single-page preview and PDF export
+  // Extract standalone Front Cover and Back Cover pages and verify 0..100% edge-to-edge coverage
   const extractedFront = extractSingleCoverPageElements({
     elements: mergedElements,
     side: 'front',
@@ -623,8 +655,16 @@ test('resolvePreviewInitialPageIndex, resolveCoverPreviewElements, and extractSi
     trimWidthIn: 6.0,
     spineWidthIn: 0.054,
   });
-  assert.ok(extractedFront.some(e => e.id === 'img-front'));
-  assert.ok(extractedBack.some(e => e.id === 'img-back'));
+  const extractedFrontImg = extractedFront.find(e => e.id === 'img-front')!;
+  const extractedBackImg = extractedBack.find(e => e.id === 'img-back')!;
+  assert.equal(extractedFrontImg.x, 0);
+  assert.equal(extractedFrontImg.y, 0);
+  assert.equal(extractedFrontImg.width, 100);
+  assert.equal(extractedFrontImg.height, 100);
+  assert.equal(extractedBackImg.x, 0);
+  assert.equal(extractedBackImg.y, 0);
+  assert.equal(extractedBackImg.width, 100);
+  assert.equal(extractedBackImg.height, 100);
 
   // Even when only 1 cover image is inserted, both Front Cover and Back Cover extractions include it
   const singleCoverFront = extractSingleCoverPageElements({

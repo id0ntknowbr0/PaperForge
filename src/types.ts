@@ -122,6 +122,7 @@ export interface StudioBookProject {
   pages: StudioPage[];
   lastSaved: string;
   updatedAt?: number;
+  projectStatus?: 'in_progress' | 'completed';
 }
 
 export interface InteriorConfig {
